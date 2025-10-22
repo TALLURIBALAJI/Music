@@ -1,0 +1,7 @@
+streamlit
+opencv-python
+deepface
+pretty_midi
+pygame
+numpy
+tf-keras
