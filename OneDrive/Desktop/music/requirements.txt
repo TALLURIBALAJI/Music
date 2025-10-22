@@ -1,9 +1,7 @@
-streamlit
-streamlit-autorefresh
+﻿streamlit
+streamlit-webrtc
+av
 opencv-python
-pretty_midi
-pygame
-numpy
-tf-keras
 fer
 tensorflow
+numpy

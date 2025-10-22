@@ -1,0 +1,9 @@
+streamlit
+streamlit-autorefresh
+opencv-python
+pretty_midi
+pygame
+numpy
+tf-keras
+fer
+tensorflow
