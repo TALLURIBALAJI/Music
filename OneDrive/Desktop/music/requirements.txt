@@ -5,3 +5,4 @@ pretty_midi
 pygame
 numpy
 tf-keras
+soundfile
