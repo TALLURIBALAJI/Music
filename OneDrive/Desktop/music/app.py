@@ -6,8 +6,10 @@ import tempfile
 import pygame
 import time
 import os
+import base64
 from io import BytesIO
 import wave
+from fer.fer import FER
 
 # Modular functions: detect_emotion, generate_midi_for_emotion, midi_to_wav, play_sound
 
@@ -21,95 +23,110 @@ EMOTION_MAP = {
     'disgust': 'disgust'
 }
 
+# Map emotions to music files
+EMOTION_MUSIC_FILES = {
+    'happy': 'musics/happy.mp3',
+    'sad': 'musics/sad.mp3',
+    'angry': 'musics/angry.mp3',
+    'neutral': 'musics/Neutral.mp3',
+    'surprise': 'musics/Surprise.mp3',
+    'fear': 'musics/fear.mp3',
+    'disgust': 'musics/Disgusting.mp3'  # Fallback to angry for disgust (no disgust.mp3 found)
+}
+
 st.set_page_config(page_title="AI Music Composer from Face Emotions", layout='wide')
 
-# Emotion detection using OpenCV DNN with pre-trained model
+# Emotion detection using FER (Facial Expression Recognition) - accurate CNN model
 @st.cache_resource
 def load_emotion_model():
-    """Load pre-trained emotion detection model (uses OpenCV DNN, no external downloads)."""
+    """Load pre-trained FER emotion detection model (accurate CNN-based)."""
     try:
-        # Use a lightweight CNN trained on emotion classification
-        # We'll use a simple model based on facial landmarks and DNN
-        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-        return face_cascade
+        # FER uses MTCNN for face detection and a CNN for emotion classification
+        # It's pre-trained on FER2013 dataset (very accurate)
+        emotion_detector = FER(mtcnn=True)  # Use MTCNN for better face detection
+        return emotion_detector
     except Exception as e:
+        st.error(f"Failed to load emotion model: {e}")
         return None
 
 def detect_emotion(frame_bgr):
     """
-    Detect all 7 core emotions by analyzing facial features.
-    Emotions: happy, sad, angry, neutral, surprise, fear, disgust
+    Detect emotion using FER (Facial Expression Recognition) library.
+    Returns one of: happy, sad, angry, neutral, surprise, fear, disgust
+    Uses deep learning CNN model trained on FER2013 dataset.
     """
     try:
-        face_cascade = load_emotion_model()
-        if face_cascade is None:
+        emotion_detector = load_emotion_model()
+        if emotion_detector is None:
             return 'neutral'
         
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, 1.3, 5, minSize=(30, 30))
+        # Convert BGR to RGB for FER
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         
-        if len(faces) == 0:
+        # Detect emotions
+        result = emotion_detector.detect_emotions(frame_rgb)
+        
+        if not result or len(result) == 0:
             return 'neutral'
         
-        # Get the largest face (main subject)
-        x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
-        face_roi = gray[y:y+h, x:x+w]
+        # Get the first detected face's emotions
+        emotions = result[0]['emotions']
         
-        # Calculate facial feature regions
-        # 1. Eye region (upper third) - for eye openness and tension
-        eye_region = face_roi[:h//3, :]
-        eye_variance = np.var(eye_region)
-        eye_mean = np.mean(eye_region)
+        # Find the dominant emotion
+        dominant_emotion = max(emotions, key=emotions.get)
         
-        # 2. Mouth region (lower half) - for mouth openness and smile
-        mouth_region = face_roi[h//2:, :]
-        mouth_intensity = np.mean(mouth_region)
-        mouth_variance = np.var(mouth_region)
+        # Map FER emotions to our 7 emotions
+        emotion_map = {
+            'happy': 'happy',
+            'sad': 'sad',
+            'angry': 'angry',
+            'neutral': 'neutral',
+            'surprise': 'surprise',
+            'fear': 'fear',
+            'disgust': 'disgust'
+        }
         
-        # 3. Nose region (middle) - for wrinkles (disgust indicator)
-        nose_region = face_roi[h//3:h//2, w//4:3*w//4]
-        nose_variance = np.var(nose_region)
-        
-        # 4. Overall face metrics
-        face_contrast = np.std(face_roi)
-        brightness = np.mean(face_roi)
-        
-        # Edge detection for intensity of expression
-        edges = cv2.Canny(face_roi, 100, 200)
-        edge_density = np.mean(edges) / 255.0
-        
-        # Emotion classification logic (order matters!)
-        
-        # DISGUST: wrinkled nose, low brightness, high contrast
-        if nose_variance > 150 and brightness < 85 and face_contrast > 35 and mouth_intensity < 95:
-            return 'disgust'
-        
-        # FEAR: very wide eyes, mouth open, high edge density (tense)
-        elif eye_variance > 350 and mouth_intensity < 75 and edge_density > 0.15:
-            return 'fear'
-        
-        # SURPRISE: very wide eyes, mouth open, moderate brightness
-        elif eye_variance > 300 and mouth_intensity < 85 and brightness > 95:
-            return 'surprise'
-        
-        # HAPPY: bright mouth (smile), eyes open, good face contrast
-        elif mouth_intensity > 105 and eye_variance > 200 and face_contrast > 28:
-            return 'happy'
-        
-        # ANGRY: low brightness, high contrast, tense (high edge density)
-        elif brightness < 92 and face_contrast > 38 and edge_density > 0.12:
-            return 'angry'
-        
-        # SAD: low brightness, low contrast, subtle features
-        elif brightness < 102 and face_contrast < 32 and mouth_intensity < 95:
-            return 'sad'
-        
-        # NEUTRAL: balanced features
-        else:
-            return 'neutral'
+        return emotion_map.get(dominant_emotion, 'neutral')
     
     except Exception as e:
         return 'neutral'
+
+# Load pre-recorded music file for emotion
+def get_music_for_emotion(emotion):
+    """
+    Load the pre-recorded MP3 file for the detected emotion.
+    Returns the file path and audio bytes.
+    """
+    try:
+        music_file = EMOTION_MUSIC_FILES.get(emotion, 'musics/Neutral.mp3')
+        music_path = os.path.join(os.path.dirname(__file__), music_file)
+        
+        if not os.path.exists(music_path):
+            st.error(f"Music file not found: {music_path}")
+            return None, None
+        
+        # Read the audio file
+        with open(music_path, 'rb') as f:
+            audio_bytes = f.read()
+        
+        return music_path, audio_bytes
+    except Exception as e:
+        st.error(f"Error loading music: {e}")
+        return None, None
+
+
+def play_music_file(music_path):
+    """Play MP3 file using pygame mixer with high quality settings."""
+    try:
+        pygame.mixer.quit()
+        # Initialize with higher quality settings for clear audio
+        pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=4096)
+        pygame.mixer.music.load(music_path)
+        pygame.mixer.music.set_volume(1.0)  # Full volume
+        pygame.mixer.music.play()
+    except Exception as e:
+        st.error(f"Playback error: {e}")
+
 
 # Music generation
 def generate_midi_for_emotion(emotion, length_seconds=6, tempo=120):
@@ -200,29 +217,31 @@ def midi_to_wav(pretty_midi_obj, sample_rate=44100):
         for note in inst.notes:
             freq = pretty_midi.note_number_to_hz(note.pitch)
             start_i = int(note.start * sample_rate)
-            end_i = int(note.end * sample_rate)
-            if end_i > len(t):
-                end_i = len(t)
+            end_i = min(int(note.end * sample_rate), len(t))
             tt = np.linspace(0, note.end - note.start, end_i - start_i, endpoint=False)
             envelope = np.linspace(1.0, 0.01, len(tt))
             wave = 0.1 * (note.velocity / 127.0) * np.sin(2 * np.pi * freq * tt) * envelope
             audio[start_i:end_i] += wave
 
-    # normalize
     max_val = np.max(np.abs(audio))
     if max_val > 0:
         audio = audio / max_val * 0.9
-    # convert to 16-bit PCM
+
     audio_int16 = np.int16(audio * 32767)
     return sample_rate, audio_int16
 
 
 def play_wav_data(sample_rate, audio_int16):
-    # Initialize pygame mixer
-    pygame.mixer.init(frequency=sample_rate, size=-16, channels=1)
-    sound = pygame.sndarray.make_sound(audio_int16)
-    sound.play()
-    return sound
+    """Play audio using pygame mixer with correct mono format."""
+    try:
+        pygame.mixer.quit()
+        pygame.mixer.init(frequency=sample_rate, size=-16, channels=1, buffer=2048)
+        sound = pygame.sndarray.make_sound(audio_int16)
+        sound.play()
+        return sound
+    except Exception as e:
+        st.error(f"Playback error: {e}")
+        return None
 
 
 # Streamlit UI
@@ -231,102 +250,177 @@ st.title("AI Music Composer from Face Emotions")
 st.sidebar.markdown("## Controls")
 run_camera = st.sidebar.button("Start Camera")
 stop_camera = st.sidebar.button("Stop Camera")
+stop_music = st.sidebar.button("Stop Music")
 
-# Placeholders
-frame_placeholder = st.empty()
-emotion_placeholder = st.empty()
-play_placeholder = st.empty()
+# Initialize placeholders in session state (persist across reruns)
+if 'frame_placeholder' not in st.session_state:
+    st.session_state.frame_placeholder = st.empty()
+if 'emotion_placeholder' not in st.session_state:
+    st.session_state.emotion_placeholder = st.empty()
+if 'play_placeholder' not in st.session_state:
+    st.session_state.play_placeholder = st.empty()
+if 'download_placeholder' not in st.session_state:
+    st.session_state.download_placeholder = st.empty()
+
+# Use placeholders from session state
+frame_placeholder = st.session_state.frame_placeholder
+emotion_placeholder = st.session_state.emotion_placeholder
+play_placeholder = st.session_state.play_placeholder
+download_placeholder = st.session_state.download_placeholder
 
 # Webcam loop
-cap = None
-
 if 'running' not in st.session_state:
     st.session_state.running = False
 if 'last_emotion' not in st.session_state:
     st.session_state.last_emotion = 'neutral'
-if 'sound' not in st.session_state:
-    st.session_state.sound = None
+if 'emotion_freeze_until' not in st.session_state:
+    st.session_state.emotion_freeze_until = 0
+if 'frozen_emotion' not in st.session_state:
+    st.session_state.frozen_emotion = 'neutral'
+if 'current_audio_bytes' not in st.session_state:
+    st.session_state.current_audio_bytes = None
+if 'current_audio_html' not in st.session_state:
+    st.session_state.current_audio_html = ""
+if 'audio_key' not in st.session_state:
+    st.session_state.audio_key = 0
+if 'audio_dirty' not in st.session_state:
+    st.session_state.audio_dirty = False
+if 'download_key' not in st.session_state:
+    st.session_state.download_key = "download_0"
+if 'cap' not in st.session_state:
+    st.session_state.cap = None
+if 'last_rerun' not in st.session_state:
+    st.session_state.last_rerun = 0
+if 'frame_count' not in st.session_state:
+    st.session_state.frame_count = 0
 
 if run_camera:
     st.session_state.running = True
 if stop_camera:
     st.session_state.running = False
+    if st.session_state.cap is not None:
+        st.session_state.cap.release()
+        st.session_state.cap = None
+if stop_music:
+    play_placeholder.empty()
+    download_placeholder.empty()
+    st.session_state.current_audio_bytes = None
+    st.session_state.current_audio_html = ""
+    st.session_state.audio_dirty = False
+    st.session_state.download_key = f"download_stop_{int(time.time()*1000)}"
+    try:
+        pygame.mixer.music.stop()
+    except Exception:
+        pass
 
 if st.session_state.running:
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        st.error("Could not open webcam")
-        st.session_state.running = False
-    else:
-        audio_file_bytes = None
-        while st.session_state.running:
-            ret, frame = cap.read()
-            if not ret:
-                st.error("Failed to read frame from webcam")
-                break
-
-            # Detect emotion
+    # Open camera if not already open
+    if st.session_state.cap is None:
+        st.session_state.cap = cv2.VideoCapture(0)
+        if not st.session_state.cap.isOpened():
+            st.error("Could not open webcam")
+            st.session_state.running = False
+            st.session_state.cap = None
+    
+    if st.session_state.cap is not None:
+        ret, frame = st.session_state.cap.read()
+        if not ret:
+            st.warning("Failed to read frame from webcam")
+            st.session_state.cap.release()
+            st.session_state.cap = None
+        else:
             emotion = detect_emotion(frame)
-            
-            # Draw face detection boxes for visual feedback
+
+            current_time = time.time()
+            is_frozen = current_time < st.session_state.emotion_freeze_until
+
+            if is_frozen:
+                display_emotion = st.session_state.frozen_emotion
+                time_remaining = max(int(st.session_state.emotion_freeze_until - current_time), 0)
+            else:
+                display_emotion = emotion
+                time_remaining = 0
+
             face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             faces = face_cascade.detectMultiScale(gray, 1.3, 5, minSize=(30, 30))
             frame_display = frame.copy()
             for (x, y, w, h) in faces:
                 cv2.rectangle(frame_display, (x, y), (x+w, y+h), (0, 255, 0), 2)
-            
-            # Display frame with boxes
+
             frame_rgb = cv2.cvtColor(frame_display, cv2.COLOR_BGR2RGB)
             frame_placeholder.image(frame_rgb, channels='RGB')
 
-            # Update emotion display
-            emotion_placeholder.markdown(f"### 😊 Detected emotion: **{emotion.upper()}**")
+            if is_frozen:
+                emotion_placeholder.markdown(
+                    f"### 😊 Detected emotion: **{display_emotion.upper()}** 🔒 (Locked for {time_remaining}s)"
+                )
+            else:
+                emotion_placeholder.markdown(f"### 😊 Current emotion: **{display_emotion.upper()}**")
 
-            # Generate and play music on emotion change
-            if emotion != st.session_state.last_emotion:
-                st.session_state.last_emotion = emotion
+            should_play_music = False
+            if not is_frozen and display_emotion != st.session_state.last_emotion:
+                should_play_music = True
+                st.session_state.last_emotion = display_emotion
+                st.session_state.frozen_emotion = display_emotion
+                st.session_state.emotion_freeze_until = current_time + 25
 
-                # generate midi
-                pm = generate_midi_for_emotion(emotion, length_seconds=6)
-                # convert to wav
-                sr, audio_int16 = midi_to_wav(pm)
-
-                # save to tempfile
-                tmp_wav = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
-                try:
-                    # write WAV
-                    with wave.open(tmp_wav.name, 'wb') as wf:
-                        wf.setnchannels(1)
-                        wf.setsampwidth(2)
-                        wf.setframerate(sr)
-                        wf.writeframes(audio_int16.tobytes())
-
-                    # play sound
-                    if st.session_state.sound is not None:
+            if should_play_music:
+                music_path, audio_file_bytes = get_music_for_emotion(display_emotion)
+                if music_path and audio_file_bytes:
+                    try:
                         try:
-                            st.session_state.sound.stop()
+                            pygame.mixer.music.stop()
                         except Exception:
                             pass
-                    st.session_state.sound = play_wav_data(sr, audio_int16)
 
-                    # prepare download
-                    with open(tmp_wav.name, 'rb') as f:
-                        audio_file_bytes = f.read()
+                        st.session_state.current_audio_bytes = audio_file_bytes
+                        st.session_state.audio_key += 1
+                        st.session_state.download_key = f"download_{st.session_state.audio_key}_{int(time.time()*1000)}"
+                        encoded_audio = base64.b64encode(audio_file_bytes).decode('utf-8')
+                        st.session_state.current_audio_html = (
+                            f'<audio id="emotion-audio" data-version="{st.session_state.audio_key}" '
+                            'controls autoplay loop style="width:100%;">'
+                            f'<source src="data:audio/mp3;base64,{encoded_audio}" type="audio/mp3">'
+                            "Your browser does not support the audio element."
+                            "</audio>"
+                        )
+                        st.session_state.audio_dirty = True
+                    except Exception as e:
+                        st.error(f"Audio processing error: {e}")
 
-                    play_placeholder.audio(audio_file_bytes, format='audio/wav')
+            if st.session_state.current_audio_bytes is not None:
+                if st.session_state.audio_dirty:
+                    play_placeholder.empty()
+                    download_placeholder.empty()
+                    st.session_state.audio_dirty = False
 
-                    # download button
-                    st.download_button(label='Download Music', data=audio_file_bytes, file_name=f'{emotion}_music.wav', mime='audio/wav')
+                play_placeholder.markdown(
+                    st.session_state.current_audio_html,
+                    unsafe_allow_html=True
+                )
 
-                except Exception as e:
-                    st.error(f"Audio processing error: {e}")
-
-            # small sleep to avoid busy loop
-            time.sleep(0.1)
-
-        cap.release()
+                download_placeholder.download_button(
+                    label=f'💾 Download {st.session_state.last_emotion.capitalize()} Music',
+                    data=st.session_state.current_audio_bytes,
+                    file_name=f'{st.session_state.last_emotion}_music.mp3',
+                    mime='audio/mp3',
+                    key=st.session_state.download_key
+                )
+            
+            # Increment frame count and use controlled rerun
+            st.session_state.frame_count += 1
+            current_time_check = time.time()
+            
+            # Only rerun if enough time has passed (prevents hitting rerun limits)
+            if current_time_check - st.session_state.last_rerun >= 0.15:
+                st.session_state.last_rerun = current_time_check
+                st.rerun()
 else:
+    # Release camera when stopped
+    if st.session_state.cap is not None:
+        st.session_state.cap.release()
+        st.session_state.cap = None
     st.info("Camera is stopped. Click 'Start Camera' in the sidebar to begin.")
 
 st.markdown("---")
